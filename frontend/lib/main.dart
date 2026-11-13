@@ -8,7 +8,7 @@
 /// ★ Ingress 路徑處理
 /// ---------------------------------------------------------------------------
 /// Home Assistant 的 Ingress 會在 URL 前加上
-/// `/api/hassio_ingress/<token>/<slug>`，因此 API 呼叫不能寫死路徑。
+/// `/api/hassio_ingress/<token>`（token 已綁定本 Add-on），因此 API 呼叫不能寫死路徑。
 /// 這裡在啟動時從瀏覽器網址推導出 base path，交給 ApiClient 使用。
 library;
 

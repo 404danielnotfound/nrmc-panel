@@ -91,7 +91,7 @@ def create_app(store: DeviceStore | None = None,
         """健康檢查。"""
         return jsonify({
             "ok": True,
-            "version": "1.0.1",
+            "version": "1.0.2",
             "device_count": len(app.store),
             "ws_clients": app.broadcaster.client_count(),
             "at_port": AT_PORT,

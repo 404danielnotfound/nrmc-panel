@@ -13,7 +13,7 @@
 param(
     [switch]$Push,
     [switch]$Test,
-    [string]$Tag = "nrmc-panel:1.0.1"
+    [string]$Tag = "nrmc-panel:1.0.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,7 +122,7 @@ if ($Push) {
     #   version 來自 .env 的 VERSION（setup.ps1 寫入），跟 config.yaml 的 version 必須一致。
     #   舊寫法只推了 :latest，HA 照 version 去拉就會 404 manifest unknown。
     $versionLine = (Get-Content ".env" | Where-Object { $_ -match "^VERSION=" } | ForEach-Object { ($_ -split "=", 2)[1].Trim() })
-    if (-not $versionLine) { $versionLine = "1.0.1" }
+    if (-not $versionLine) { $versionLine = "1.0.2" }
 
     foreach ($arch in $archList) {
         if ($arch -ne $hostArch) { continue }

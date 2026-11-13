@@ -6,10 +6,10 @@
 /// ---------------------------------------------------------------------------
 /// 在 Home Assistant 裡，Add-on 不是掛在網域根目錄，而是：
 ///
-///     https://<ha>:8123/api/hassio_ingress/<token>/nrmc_panel/
+///     https://<ha>:8123/api/hassio_ingress/<token>/index.html
 /// 因此 API 的完整路徑是：
 ///
-///     https://<ha>:8123/api/hassio_ingress/<token>/nrmc_panel/api/devices
+///     https://<ha>:8123/api/hassio_ingress/<token>/api/devices
 ///
 /// 如果前端寫死 `/api/devices`，在 Ingress 底下會 404。
 ///
@@ -170,7 +170,7 @@ class ApiClient {
   /// 開發模式下指定後端位置；正式環境留 null 走 Ingress 路徑推導。
   final String? baseUrlOverride;
 
-  /// 快取的 base path，例如 "/api/hassio_ingress/TOKEN/nrmc_panel"。
+  /// 快取的 base path，例如 "/api/hassio_ingress/TOKEN"。
   String? _ingressPath;
 
   /// 設定 Ingress base path（由瀏覽器端注入）。
@@ -196,16 +196,24 @@ class ApiClient {
   /// 從瀏覽器目前網址推導 Ingress base path。
   ///
   /// 範例：
-  ///   http://host:8123/api/hassio_ingress/abc123/nrmc_panel/
-  ///   → "/api/hassio_ingress/abc123/nrmc_panel"
+  ///   http://host:8123/api/hassio_ingress/abc123/index.html
+  ///   → "/api/hassio_ingress/abc123"
+  ///
+  /// ★ 為什麼只取 token、不取後面的 slug / index.html？
+  ///   Supervisor 的 Ingress 格式是 /api/hassio_ingress/<token>/<path>，
+  ///   token 已經綁定到本 Add-on，後面的 index.html 只是 ingress_entry。
+  ///   舊寫法把 index.html 當成 slug，導致 baseUrl 變成
+  ///   .../api/hassio_ingress/<token>/index.html，
+  ///   之後所有 API 變成 /index.html/api/devices（Nginx 回 index.html，
+  ///   前端 jsonDecode 看到 <!DOCTYPE 就報 FormatException）。
   String? _derivePathFromLocation() {
     if (kIsWeb) {
       final segments = Uri.base.pathSegments;
       final index = segments.indexOf('hassio_ingress');
-      if (index >= 0 && index + 2 < segments.length) {
-        // hassio_ingress/<token>/<slug>
-        return '/api/hassio_ingress/${segments[index + 1]}/'
-            '${segments[index + 2]}';
+      if (index >= 0 && index + 1 < segments.length) {
+        final token = segments[index + 1];
+        if (token.isEmpty || token == 'index.html') return null;
+        return '/api/hassio_ingress/$token';
       }
     }
     return null;
