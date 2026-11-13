@@ -15,4 +15,4 @@ args:
 labels:
   org.opencontainers.image.title: NR-MC 控制台
   org.opencontainers.image.description: NR-MC 系列 WiFi 新風控制器管理面板
-  org.opencontainers.image.source: https://github.com/your-name/nrmc-panel
+  org.opencontainers.image.source: https://github.com/404danielnotfound/nrmc-panel
