@@ -1,0 +1,18 @@
+# HA Add-on 建置設定
+#
+# ★ 為什麼 build_from 指向 ghcr.io/home-assistant/*-base？
+#   Home Assistant 官方維護的 base image 已經內建 s6-overlay v3，
+#   Supervisor 預期容器用 /init 當入口。不同架構有對應的映像。
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.19
+  amd64: ghcr.io/home-assistant/amd64-base:3.19
+  armhf: ghcr.io/home-assistant/armhf-base:3.19
+  armv7: ghcr.io/home-assistant/armv7-base:3.19
+  i386: ghcr.io/home-assistant/i386-base:3.19
+args:
+  FLUTTER_VERSION: "3.47.7"
+  BASE_IMAGE: ghcr.io/home-assistant/amd64-base:3.19
+labels:
+  org.opencontainers.image.title: NR-MC 控制台
+  org.opencontainers.image.description: NR-MC 系列 WiFi 新風控制器管理面板
+  org.opencontainers.image.source: https://github.com/your-name/nrmc-panel

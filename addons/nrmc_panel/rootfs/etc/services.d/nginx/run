@@ -1,0 +1,16 @@
+#!/usr/bin/with-contenv bashio
+# =====================================================================
+# NR-MC 控制台 —— Nginx 服務
+#
+# 由 s6 overlay 呼叫，負責啟動 Nginx。
+# =====================================================================
+
+# 檢查 nginx 設定是否正確，錯的話要立刻讓容器退出，
+# 否則 Supervisor 只會看到「容器一直重啟」而不知道原因。
+nginx -t || {
+    bashio::log.fatal "Nginx 設定檢查失敗，容器無法啟動"
+    exit 1
+}
+
+bashio::log.info "啟動 Nginx（監聽 8099）"
+exec nginx -g "daemon off;"

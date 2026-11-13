@@ -1,0 +1,44 @@
+name: NR-MC 控制台
+version: "1.0.0"
+slug: nrmc_panel
+description: >-
+  NR-MC 系列 WiFi 新風控制器管理面板。可搜尋區網內的設備、
+  管理設備清單，並直接控制風機檔位（一檔／二檔／關閉）與繼電器互鎖。
+url: https://github.com/404danielnotfound/nrmc-panel
+image: ghcr.io/404danielnotfound/nrmc-panel-{arch}
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+init: false
+host_network: true
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+ingress_entry: index.html
+ingress_stream: true
+panel_icon: mdi:air-filter
+panel_title: NR-MC 控制台
+panel_admin: true
+homeassistant_api: false
+hassio_api: false
+hassio_role: default
+auth_api: false
+ports: {}
+# 注意：host_network: true 時不需要做連接埠對應，
+# 容器直接使用主機網路，8099 即為主機的 8099。
+options:
+  at_port: "12345"
+  scan_subnet: ""
+  log_level: info
+  ping_timeout_ms: "300"
+  http_port: "8080"
+schema:
+  at_port: str
+  scan_subnet: str?
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
+  ping_timeout_ms: str
+  http_port: str

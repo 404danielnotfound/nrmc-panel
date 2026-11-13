@@ -1,0 +1,14 @@
+#!/usr/bin/with-contenv bashio
+# =====================================================================
+# NR-MC 控制台 —— Flask 後端服務
+#
+# 由 s6 overlay 呼叫，負責啟動 Python 後端。
+# =====================================================================
+
+cd /app || exit 1
+
+bashio::log.info "啟動 NR-MC 控制台後端"
+
+# PYTHONUNBUFFERED=1 讓 print() 立即輸出到日誌，
+# 否則 Python 會緩衝輸出，HA 的日誌面板會看不到即時訊息。
+exec python3 -u /app/entrypoint.py

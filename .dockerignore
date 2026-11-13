@@ -1,0 +1,52 @@
+# =====================================================================
+# Docker 建置時不需要的檔案
+#
+# 目的：讓 docker build 更快、讓 build context 變小，
+#       同時避免把本機開發資料混進映像。
+# =====================================================================
+
+# --- Git ---
+.git
+.gitignore
+.github
+
+# --- Python ---
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+backend/.venv
+backend/venv
+venv
+.venv
+**/*.egg-info
+
+# --- Flutter / Dart ---
+frontend/.dart_tool
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/build
+**/ephemeral
+
+# ★ 關鍵：frontend/build 不能拿來建置映像。
+#   映像內的前端必須由 Dockerfile 的 stage 1 重新編譯，
+#   否則會用到開發機上可能是舊版或不同設定的產物。
+
+# --- 本機資料（設備清單、log）---
+backend/data
+data
+*.log
+*.err
+
+# --- 編輯器 / 系統 ---
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- 文件（不影響執行）---
+*.md
+!addons/**/README.md

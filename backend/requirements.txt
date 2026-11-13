@@ -1,0 +1,18 @@
+# NR-MC 控制台後端相依套件
+#
+# 說明：
+#   flask-sock 需要 simple-websocket，flask 3.x 的 websocket 支援需要
+#   Werkzeug 的 dev server 支援，因此正式環境要改用 gunicorn 或
+#   保留 Flask 內建 server（單機用途夠用）。
+#
+# ★ 關於生產環境 server：
+#   Add-on 是獨立容器、不處理 HA 的請求，負載很輕。
+#   Flask 內建 server (threaded=True) 在這種規模下完全夠用，
+#   而且能讓 WebSocket 直接運作（gunicorn 需要額外的 gevent/websocket worker）。
+#   因此這裡刻意使用內建 server，並在程式碼中開啟 threaded。
+
+Flask==3.1.3
+flask-sock==0.7.0
+
+# 測試用（容器內不需要，但保留方便在 HA 上除錯）
+# pytest==9.2.0

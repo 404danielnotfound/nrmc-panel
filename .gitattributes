@@ -1,0 +1,48 @@
+# =====================================================================
+# Git 換行符設定
+#
+# ★ 為什麼需要這個檔案？
+#   s6 開機腳本（*.run）的第一行是 shebang：
+#       #!/usr/bin/with-contenv bashio
+#   Linux 要求這行完全正確，CRLF 會讓容器啟動失敗：
+#       bad interpreter: /usr/bin/with-contenv^M
+#
+#   Git 在 Windows 上 checkout 預設會把 LF 轉成 CRLF，
+#   等於每次 clone 檔案就壞掉。這個檔案可以強制：
+#     - *.run 等腳本 → 永遠保持 LF
+#     - 其他文字檔   → 保持 LF（Windows 編輯器也能正常處理）
+
+# --- 預設：文字檔一律 LF ---
+* text=auto eol=lf
+
+# --- s6 腳本：強制 LF，不可協商 ---
+# s6-overlay v3 的服務腳本檔名就叫 `run`（無副檔名），放在
+# etc/services.d/<服務名>/run，因此除了 *.run 也要涵蓋 run。
+*.run text eol=lf
+**/run text eol=lf
+*.sh text eol=lf
+
+# --- s6 服務定義目錄：整個目錄強制 LF ---
+addons/nrmc_panel/rootfs/** text eol=lf
+
+# --- Docker 與 YAML：強制 LF ---
+Dockerfile text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# --- PowerShell：Windows 慣例用 CRLF ---
+*.ps1 text eol=crlf
+
+# --- 二進位檔：不做轉換 ---
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.wasm binary
+*.so binary
+*.dll binary

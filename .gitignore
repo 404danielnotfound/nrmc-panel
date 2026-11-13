@@ -1,0 +1,59 @@
+# =====================================================================
+# Git 忽略清單
+#
+# ★ 關於 frontend/build/web（40 MB 的編譯產物）：
+#   不要 commit。理由：
+#     1. 這是編譯出來的，不是原始碼，改程式碼後很容易忘記重新編譯
+#        就 commit 進去，導致 Docker 映像內的版本跟你本機測的不一樣
+#     2. 体积大（40 MB），每次 commit 都會在 git 歷史裡留一份
+#     3. Docker 映像建置時本來就會重新編譯，不需要這個
+#
+#   正確流程：改完 Dart 程式碼 → docker build 會自動重新編譯
+# =====================================================================
+
+# --- Flutter / Dart ---
+frontend/build/
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/.pub-cache/
+frontend/.pub/
+**/ephemeral/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+backend/.venv/
+backend/venv/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- 本機資料 ---
+# 設備清單是各機器的本地狀態，不該進版控
+backend/data/
+data/
+*.json.bak
+
+# --- 日誌 ---
+*.log
+*.err
+logs/
+
+# --- 編輯器 / 系統 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 環境變數 ---
+.env
+.env.local
