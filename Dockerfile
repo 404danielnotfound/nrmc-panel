@@ -72,10 +72,20 @@ WORKDIR /app/frontend
 RUN flutter pub get
 
 # 再複製其餘原始碼並編譯
+# ★ --base-href 的 Ingress 陷阱：
+#   Flutter 預設產出 <base href="/">，瀏覽器會去 HA 根目錄抓
+#   flutter_bootstrap.js / main.dart.js，在 Ingress 底下一定 404，
+#   頁面就會一片空白（容器日誌只會看到 GET /index.html 200，
+#   完全沒有 JS 請求，因為請求根本沒打到容器）。
+#   解法：編譯後把 base 改成 "./"，讓所有資源都用相對路徑，
+#   不管是 Ingress 子路徑還是直接連 http://ip:8099 都能載入。
 COPY frontend/ ./
-RUN flutter build web --release \
+RUN flutter build web --release --base-href=/ \
+    && sed -i 's|<base href="/">|<base href="./">|' build/web/index.html \
+    && grep -q '<base href="./">' build/web/index.html \
     && test -f build/web/index.html \
-    && echo "=== Flutter build 完成 ===" \
+    && test -f build/web/flutter_bootstrap.js \
+    && echo "=== Flutter build 完成（base href 已改為相對路徑） ===" \
     && ls -la build/web
 
 # =====================================================================
@@ -98,7 +108,7 @@ LABEL \
     io.hass.name="NR-MC 控制台" \
     io.hass.description="NR-MC 系列 WiFi 新風控制器管理面板" \
     io.hass.type="addon" \
-    io.hass.version="1.0.0"
+    io.hass.version="1.0.1"
 
 # 官方 base 已含 s6-overlay、nginx、python3、curl。
 # 這裡只需要補上時區資料與 pip。

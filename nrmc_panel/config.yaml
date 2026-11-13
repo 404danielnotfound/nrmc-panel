@@ -1,5 +1,5 @@
 name: NR-MC 控制台
-version: "1.0.0"
+version: "1.0.1"
 slug: nrmc_panel
 description: >-
   NR-MC 系列 WiFi 新風控制器管理面板。可搜尋區網內的設備、
