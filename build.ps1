@@ -111,23 +111,31 @@ if ($Push) {
     Write-Host ""
     Write-Host "      推送各架構映像（只建置目前電腦的架構）..." -ForegroundColor Yellow
     Write-Host "      ★ 提示：只有你電腦的架構會有映像，" -ForegroundColor Gray
-    Write-Host "        其他架構請用 GitHub Actions 自動建置（見指引第 5 章）" -ForegroundColor Gray
+    Write-Host "        其他架構會由 GitHub Actions 自動建置" -ForegroundColor Gray
     Write-Host ""
 
     # 先取得目前電腦的架構
     $hostArch = docker info --format "{{.Architecture}}"
     Write-Host "      目前電腦架構: $hostArch" -ForegroundColor Gray
 
+    # ★ HA 拉的是「版本號」tag：ghcr.io/<user>/nrmc-panel-<arch>:<version>
+    #   version 來自 .env 的 VERSION（setup.ps1 寫入），跟 config.yaml 的 version 必須一致。
+    #   舊寫法只推了 :latest，HA 照 version 去拉就會 404 manifest unknown。
+    $versionLine = (Get-Content ".env" | Where-Object { $_ -match "^VERSION=" } | ForEach-Object { ($_ -split "=", 2)[1].Trim() })
+    if (-not $versionLine) { $versionLine = "1.0.0" }
+
     foreach ($arch in $archList) {
         if ($arch -ne $hostArch) { continue }
 
-        $remoteTag = "$baseRemote-$arch"
-        docker tag $Tag $remoteTag
-        Write-Host "      推送 $remoteTag" -ForegroundColor Gray
-        docker push $remoteTag
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "      X 推送失敗" -ForegroundColor Red
-            exit 1
+        foreach ($tagSuffix in @($versionLine, "latest")) {
+            $remoteTag = "$baseRemote-$arch`:$tagSuffix"
+            docker tag $Tag $remoteTag
+            Write-Host "      推送 $remoteTag" -ForegroundColor Gray
+            docker push $remoteTag
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "      X 推送失敗" -ForegroundColor Red
+                exit 1
+            }
         }
     }
 

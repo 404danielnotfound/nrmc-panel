@@ -65,16 +65,17 @@ jobs:
       # ★ 為什麼要按架構分開推？
       #   HA 的 config.yaml 寫的是 image: ghcr.io/<user>/nrmc-panel-{arch}
       #   Supervisor 會把 {arch} 換成主機的架構（amd64/aarch64/...），
-      #   所以每個架構都要有自己的映像。
+      #   並把 config.yaml 的 version 當成 tag 來拉：
+      #     ghcr.io/<user>/nrmc-panel-aarch64:1.0.0
+      #   所以每個架構都一定要有「:版本號」這個 tag，否則就是 404 manifest unknown。
+      #   版本號改了（config.yaml 的 version），這裡也要同步改。
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
+            type=raw,value=1.0.0
             type=raw,value=latest,enable={{is_default_branch}}
 
       # --- 5. 建置並推送 ---
