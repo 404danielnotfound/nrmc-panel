@@ -102,8 +102,8 @@ VERSION=1.0.0
 "@
 $exampleContent | Set-Content -Path ".env.example" -Encoding UTF8
 
-# --- 同步更新 addons/nrmc_panel/config.yaml 的 image 欄位 ---
-$configPath = "addons\nrmc_panel\config.yaml"
+# --- 同步更新 nrmc_panel/config.yaml 的 image 欄位 ---
+$configPath = "nrmc_panel\config.yaml"
 if (Test-Path $configPath) {
     $config = Get-Content $configPath -Raw -Encoding UTF8
 
@@ -120,7 +120,7 @@ if (Test-Path $configPath) {
         (New-Object System.Text.UTF8Encoding($false))
     )
 
-    Write-Host "      addons\nrmc_panel\config.yaml 已更新 image 欄位" -ForegroundColor Green
+    Write-Host "      nrmc_panel\config.yaml 已更新 image 欄位" -ForegroundColor Green
 }
 
 # ★ build.ps1 不需要修改。

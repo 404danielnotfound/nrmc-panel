@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-S6_DIR = ROOT / "addons" / "nrmc_panel" / "rootfs" / "etc" / "services.d"
+S6_DIR = ROOT / "nrmc_panel" / "rootfs" / "etc" / "services.d"
 
 
 def fix_file(path: Path) -> bool:

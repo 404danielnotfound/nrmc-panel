@@ -9,7 +9,7 @@ on:
       - 'Dockerfile'
       - 'backend/**'
       - 'frontend/**'
-      - 'addons/**'
+      - 'nrmc_panel/**'
       - '.github/workflows/build.yml'
   # 讓你可以在網頁上按按鈕手動觸發
   workflow_dispatch:

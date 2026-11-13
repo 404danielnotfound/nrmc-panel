@@ -23,7 +23,7 @@
 *.sh text eol=lf
 
 # --- s6 服務定義目錄：整個目錄強制 LF ---
-addons/nrmc_panel/rootfs/** text eol=lf
+nrmc_panel/rootfs/** text eol=lf
 
 # --- Docker 與 YAML：強制 LF ---
 Dockerfile text eol=lf

@@ -15,7 +15,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-ADDON_DIR = ROOT / "addons" / "nrmc_panel"
+ADDON_DIR = ROOT / "nrmc_panel"
 
 
 @pytest.fixture(scope="module")

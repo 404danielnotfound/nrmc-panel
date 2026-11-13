@@ -116,7 +116,7 @@ RUN apk add --no-cache \
 ENV TZ=Asia/Taipei
 
 # Nginx 設定
-COPY addons/nrmc_panel/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY nrmc_panel/nginx/nginx.conf /etc/nginx/nginx.conf
 
 # Python 後端
 WORKDIR /app
@@ -127,7 +127,7 @@ COPY backend/entrypoint.py ./
 COPY --from=flutter /app/frontend/build/web/ /usr/share/nginx/html/
 
 # s6 開機腳本：啟動 nginx 與 Flask
-COPY addons/nrmc_panel/rootfs/ /
+COPY nrmc_panel/rootfs/ /
 
 # ★ 權限與換行符修正（Windows 開發者必看）
 #   1. chmod +x：Windows 檔案系統沒有 Unix 執行權限欄位，
