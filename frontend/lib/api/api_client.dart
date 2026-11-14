@@ -94,6 +94,79 @@ class Device {
   }
 }
 
+/// 一段 AT 指令的耗時記錄。
+///
+/// 後端在每次 send() 後會 append 一筆，格式：
+///     {"cmd": "AT+STACH1=1", "ms": 53.2}
+///     {"cmd": "<connect>", "ms": 0.0, "reused": true, "ok": true}
+///
+/// 用來在 UI 上畫出耗時瀑布圖，找出瓶頸到底在哪一段。
+class OperationTiming {
+  OperationTiming({
+    required this.cmd,
+    required this.ms,
+    this.reused = false,
+    this.ok = true,
+  });
+
+  /// 指令字串（`<connect>` 代表 TCP 連線）。
+  final String cmd;
+
+  /// 耗時（毫秒）。
+  final double ms;
+
+  /// 是否為連線池複用（複用時 ms 為 0）。
+  final bool reused;
+
+  /// 該步驟是否成功。
+  final bool ok;
+
+  /// 是否是 TCP 連線步驟。
+  bool get isConnect => cmd == '<connect>';
+
+  /// 顯示用的標籤。
+  String get label {
+    if (isConnect) return reused ? '連線（複用）' : '建立 TCP 連線';
+    return cmd;
+  }
+
+  factory OperationTiming.fromJson(Map<String, dynamic> json) {
+    return OperationTiming(
+      cmd: json['cmd']?.toString() ?? '',
+      ms: (json['ms'] as num?)?.toDouble() ?? 0,
+      reused: json['reused'] == true,
+      ok: json['ok'] != false,
+    );
+  }
+
+  /// 解析後端回傳的 timings 陣列。
+  static List<OperationTiming> parseList(dynamic raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => OperationTiming.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+}
+
+/// 寫入 DO 的結果：狀態 + 逐段耗時。
+class DoResult {
+  DoResult({required this.state, this.timings = const []});
+
+  final Map<String, dynamic> state;
+  final List<OperationTiming> timings;
+
+  /// 總耗時（毫秒）。
+  double get totalMs => timings.fold(0.0, (sum, t) => sum + t.ms);
+
+  /// 最慢的一段（瓶頸）。
+  OperationTiming? get slowest {
+    if (timings.isEmpty) return null;
+    final sorted = [...timings]..sort((a, b) => b.ms.compareTo(a.ms));
+    return sorted.first;
+  }
+}
+
 /// 掃描結果中的一台設備。
 class ScanResult {
   ScanResult({
@@ -326,7 +399,7 @@ class ApiClient {
   }
 
   /// 寫入單一 DO 通道。
-  Future<Map<String, dynamic>> setDo(
+  Future<DoResult> setDo(
     int id, {
     required int channel,
     required bool on,
@@ -339,11 +412,16 @@ class ApiClient {
     _check(res);
     final data = jsonDecode(res.body) as Map<String, dynamic>;
     final state = data['state'];
-    return state is Map ? Map<String, dynamic>.from(state) : <String, dynamic>{};
+    return DoResult(
+      state: state is Map
+          ? Map<String, dynamic>.from(state)
+          : <String, dynamic>{},
+      timings: OperationTiming.parseList(data['timings']),
+    );
   }
 
   /// 全部通道開／關。
-  Future<Map<String, dynamic>> setAllDo(int id, {required bool on}) async {
+  Future<DoResult> setAllDo(int id, {required bool on}) async {
     final res = await _client.post(
       _uri('/api/devices/$id/all'),
       headers: _headers,
@@ -352,7 +430,12 @@ class ApiClient {
     _check(res);
     final data = jsonDecode(res.body) as Map<String, dynamic>;
     final state = data['state'];
-    return state is Map ? Map<String, dynamic>.from(state) : <String, dynamic>{};
+    return DoResult(
+      state: state is Map
+          ? Map<String, dynamic>.from(state)
+          : <String, dynamic>{},
+      timings: OperationTiming.parseList(data['timings']),
+    );
   }
 
   /// 開始掃描。
@@ -383,7 +466,7 @@ class ApiClient {
   }
 
   /// 送出任意 AT 指令。
-  Future<String> sendAt({
+  Future<DoResult> sendAt({
     int? deviceId,
     String? host,
     int? port,
@@ -401,7 +484,10 @@ class ApiClient {
     );
     _check(res);
     final data = jsonDecode(res.body) as Map<String, dynamic>;
-    return data['response']?.toString() ?? '';
+    return DoResult(
+      state: {'response': data['response']?.toString() ?? ''},
+      timings: OperationTiming.parseList(data['timings']),
+    );
   }
 
   void _check(http.Response res) {

@@ -21,6 +21,75 @@ import '../api/ws_client.dart';
 
 enum LoadState { idle, loading, ready, error }
 
+/// 一個操作（送出指令）的狀態機。
+///
+/// ★ 為什麼需要狀態機？
+///   使用者反映「按下後 5~10 秒才動作、有時候按了好像沒有用」。
+///   根本原因是：按下到結果回來之間沒有任何視覺回饋，
+///   使用者不知道指令是否已送出，因此會再按一次。
+///   有了明確的階段狀態，按鈕就能顯示
+///   「送出中 → 等待回讀 → 已確認」，並在進行中擋下重複點擊。
+enum OpPhase {
+  /// 閒置。
+  idle,
+
+  /// 指令已送出，等待回覆。
+  sending,
+
+  /// 已收到回覆，正在回讀確認。
+  verifying,
+
+  /// 已確認成功。
+  confirmed,
+
+  /// 失敗。
+  failed,
+}
+
+/// 一次操作的完整紀錄（含逐段耗時）。
+class OperationRecord {
+  OperationRecord({
+    required this.label,
+    required this.startedAt,
+    this.phase = OpPhase.sending,
+    this.timings = const [],
+    this.message = '',
+    this.error = '',
+  });
+
+  /// 操作描述，例如「一檔」。
+  final String label;
+
+  /// 開始時間。
+  final DateTime startedAt;
+
+  /// 目前階段。
+  OpPhase phase;
+
+  /// 逐段耗時。
+  List<OperationTiming> timings;
+
+  /// 結果訊息。
+  String message;
+
+  /// 錯誤訊息。
+  String error;
+
+  /// 總耗時（毫秒）。
+  double get totalMs => timings.fold(0.0, (sum, t) => sum + t.ms);
+
+  /// 從開始到現在的經過時間（毫秒）。
+  double get elapsedMs =>
+      DateTime.now().difference(startedAt).inMicroseconds / 1000.0;
+
+  /// 最慢的一段（瓶頸）。
+  OperationTiming? get slowest {
+    if (timings.isEmpty) return null;
+    final sorted = [...timings]..sort((a, b) => b.ms.compareTo(a.ms));
+    return sorted.first;
+  }
+}
+
 class AppState extends ChangeNotifier {
   AppState({ApiClient? api}) : api = api ?? ApiClient();
 
@@ -33,6 +102,60 @@ class AppState extends ChangeNotifier {
 
   /// 正在操作中的設備 id（用來停用按鈕、顯示 loading）。
   int? busyDeviceId;
+
+  // -- 操作狀態機與耗時紀錄 ---------------------------------------------
+
+  /// 每台設備目前的操作階段（null = 閒置）。
+  final Map<int, OpPhase> _opPhases = {};
+
+  /// 每台設備最近一次操作的紀錄。
+  final Map<int, OperationRecord> _opRecords = {};
+
+  /// 全域操作紀錄（最新在前），最多保留 20 筆。
+  final List<OperationRecord> operationLog = [];
+
+  /// 取得某台設備目前的操作階段。
+  OpPhase opPhaseOf(int deviceId) => _opPhases[deviceId] ?? OpPhase.idle;
+
+  /// 取得某台設備最近一次操作紀錄。
+  OperationRecord? opRecordOf(int deviceId) => _opRecords[deviceId];
+
+  /// 某台設備是否正在進行操作（用來擋重複點擊）。
+  bool isOpBusy(int deviceId) =>
+      opPhaseOf(deviceId) == OpPhase.sending ||
+      opPhaseOf(deviceId) == OpPhase.verifying;
+
+  void _beginOp(int deviceId, String label) {
+    final rec = OperationRecord(
+      label: label,
+      startedAt: DateTime.now(),
+      phase: OpPhase.sending,
+    );
+    _opRecords[deviceId] = rec;
+    _opPhases[deviceId] = OpPhase.sending;
+    operationLog.insert(0, rec);
+    if (operationLog.length > 20) {
+      operationLog.removeRange(20, operationLog.length);
+    }
+    busyDeviceId = deviceId;
+    _safeNotify();
+  }
+
+  void _endOp(int deviceId, OpPhase phase,
+      {List<OperationTiming> timings = const [],
+      String message = '',
+      String error = ''}) {
+    _opPhases[deviceId] = phase;
+    final rec = _opRecords[deviceId];
+    if (rec != null) {
+      rec.phase = phase;
+      rec.timings = timings;
+      rec.message = message;
+      rec.error = error;
+    }
+    busyDeviceId = null;
+    _safeNotify();
+  }
 
   // -- WebSocket --------------------------------------------------------
   ///
@@ -260,36 +383,56 @@ class AppState extends ChangeNotifier {
   }
 
   /// 寫入 DO 通道。
+  ///
+  /// ★ P1-4：進行中的重複點擊直接忽略。
+  ///   使用者看到風機慢會再按一次，後端也會回 409，
+  ///   這裡在發出前就先擋掉，避免送出無意義的請求。
   Future<String?> setDo(int id, {required int channel, required bool on}) async {
-    busyDeviceId = id;
-    _safeNotify();
+    if (isOpBusy(id)) {
+      return '上一個指令還在執行中，請稍候';
+    }
+    _beginOp(id, channel == 0 ? '全部通道' : 'DO$channel');
     try {
-      final state = await api.setDo(id, channel: channel, on: on);
-      _mergeState(id, state);
+      final result = await api.setDo(id, channel: channel, on: on);
+      _mergeState(id, result.state);
+      _endOp(
+        id,
+        OpPhase.confirmed,
+        timings: result.timings,
+        message: on ? '已開啟' : '已關閉',
+      );
       return null;
     } on ApiException catch (e) {
+      _endOp(id, OpPhase.failed, error: e.message);
       return e.message;
     } catch (e) {
+      _endOp(id, OpPhase.failed, error: e.toString());
       return e.toString();
-    } finally {
-      busyDeviceId = null;
-      _safeNotify();
     }
   }
 
   /// 全部通道開／關。
   Future<String?> setAllDo(int id, {required bool on}) async {
-    busyDeviceId = id;
-    _safeNotify();
+    if (isOpBusy(id)) {
+      return '上一個指令還在執行中，請稍候';
+    }
+    _beginOp(id, on ? '全部開啟' : '全部關閉');
     try {
-      final state = await api.setAllDo(id, on: on);
-      _mergeState(id, state);
+      final result = await api.setAllDo(id, on: on);
+      _mergeState(id, result.state);
+      _endOp(
+        id,
+        OpPhase.confirmed,
+        timings: result.timings,
+        message: on ? '已開啟' : '已關閉',
+      );
       return null;
+    } on ApiException catch (e) {
+      _endOp(id, OpPhase.failed, error: e.message);
+      return e.message;
     } catch (e) {
+      _endOp(id, OpPhase.failed, error: e.toString());
       return e.toString();
-    } finally {
-      busyDeviceId = null;
-      _safeNotify();
     }
   }
 
@@ -387,23 +530,27 @@ class AppState extends ChangeNotifier {
   // -- AT 指令 ----------------------------------------------------------
 
   /// 送出任意 AT 指令。
-  Future<String?> sendAt({
+  ///
+  /// 回傳 (回覆內容, 逐段耗時)。失敗時回傳 (錯誤訊息, 空耗時)。
+  Future<(String, List<OperationTiming>)> sendAt({
     int? deviceId,
     String? host,
     int? port,
     required String command,
   }) async {
     try {
-      return await api.sendAt(
+      final result = await api.sendAt(
         deviceId: deviceId,
         host: host,
         port: port,
         command: command,
       );
+      final response = result.state['response']?.toString() ?? '';
+      return (response, result.timings);
     } on ApiException catch (e) {
-      return e.message;
+      return (e.message, const <OperationTiming>[]);
     } catch (e) {
-      return e.toString();
+      return (e.toString(), const <OperationTiming>[]);
     }
   }
 }

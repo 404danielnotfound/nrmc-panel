@@ -108,7 +108,7 @@ LABEL \
     io.hass.name="NR-MC 控制台" \
     io.hass.description="NR-MC 系列 WiFi 新風控制器管理面板" \
     io.hass.type="addon" \
-    io.hass.version="1.0.2"
+    io.hass.version="1.0.3"
 
 # 官方 base 已含 s6-overlay、nginx、python3、curl。
 # 這裡只需要補上時區資料與 pip。

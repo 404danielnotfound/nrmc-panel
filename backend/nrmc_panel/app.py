@@ -20,6 +20,7 @@ Flask 應用，提供：
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -30,6 +31,8 @@ from . import scanner
 from .at_client import AtError, AtTcpClient
 from .device_store import DeviceStore
 from .ws import StateBroadcaster, build_status_event, register_ws_routes
+
+_log = logging.getLogger("nrmc_panel")
 
 # 讀取 Add-on 的 options（由 s6 run 腳本透過環境變數注入）
 AT_PORT = int(os.environ.get("NRMC_AT_PORT", "12345"))
@@ -49,6 +52,133 @@ _scan_state: dict = {
 }
 _scan_lock = threading.Lock()
 _scan_thread: threading.Thread | None = None
+
+# ★ P0-5：每台設備一把寫入鎖，防止同一台設備被同時下指令。
+#   問題來源：使用者看到風機慢，又按一次 —— 兩次 POST 各自開一條 TCP
+#   連線同時送 AT，設備端回應交錯，前端收到亂序結果看起來像「沒反應」。
+#   這裡用「非阻塞 try-lock」：拿不到鎖就直接回 409，
+#   讓前端可以明確顯示「上一個指令還在執行中」。
+_device_io_locks: dict[int, threading.Lock] = {}
+_device_io_locks_guard = threading.Lock()
+
+
+def _io_lock_for(device_id: int) -> threading.Lock:
+    """取得（並建立）某台設備的寫入鎖。"""
+    with _device_io_locks_guard:
+        lock = _device_io_locks.get(device_id)
+        if lock is None:
+            lock = threading.Lock()
+            _device_io_locks[device_id] = lock
+        return lock
+
+
+# ★ P1-1：持久 TCP 連線池
+#   每次 HTTP 請求都新建連線 + 關閉，等於每次都付一次 TCP 三向握手
+#   （加上 Linux SYN 重傳的機率成本）。同一台設備連續操作時
+#   直接複用既有連線，可省掉整段握手時間。
+#   key = (host, port)；閒置超過 IDLE_TIMEOUT 就關掉釋放。
+_CONNECTION_POOL: dict[tuple[str, int], AtTcpClient] = {}
+_CONNECTION_POOL_LOCK = threading.Lock()
+# 連線閒置多久後回收（秒）
+CONNECTION_IDLE_TIMEOUT = 60.0
+
+
+def _client_for(device: dict) -> AtTcpClient:
+    """依設備記錄建立 AT 客戶端。"""
+    return AtTcpClient(
+        device.get("host", ""),
+        int(device.get("port", AT_PORT)),
+        timeout=5.0,
+    )
+
+
+def _pool_key(device: dict) -> tuple[str, int]:
+    return (device.get("host", ""), int(device.get("port", AT_PORT)))
+
+
+def _get_pooled_client(device: dict) -> tuple[AtTcpClient, bool]:
+    """取得可用的 AT 客戶端。
+
+    Returns:
+        (client, reused) —— reused=True 表示這是從池子拿的既有連線。
+    """
+    key = _pool_key(device)
+    with _CONNECTION_POOL_LOCK:
+        client = _CONNECTION_POOL.get(key)
+        if client is not None:
+            if client.is_connected:
+                client.mark_reused()
+                return client, True
+            # 連線已斷（設備重開 / 網路中斷）：丟掉重來
+            try:
+                client.close()
+            except Exception:
+                pass
+            _CONNECTION_POOL.pop(key, None)
+
+    fresh = _client_for(device)
+    return fresh, False
+
+
+def _release_pooled_client(client: AtTcpClient, device: dict,
+                           keep: bool) -> None:
+    """操作結束後處理連線。
+
+    keep=True  → 放回池子（idle timeout 後自動回收）
+    keep=False → 直接關閉
+    """
+    key = _pool_key(device)
+    if not keep:
+        try:
+            client.close()
+        except Exception:
+            pass
+        with _CONNECTION_POOL_LOCK:
+            if _CONNECTION_POOL.get(key) is client:
+                _CONNECTION_POOL.pop(key, None)
+        return
+
+    with _CONNECTION_POOL_LOCK:
+        old = _CONNECTION_POOL.get(key)
+        if old is not None and old is not client:
+            try:
+                old.close()
+            except Exception:
+                pass
+        _CONNECTION_POOL[key] = client
+
+
+def _close_stale_connections() -> None:
+    """回收閒置過久的連線（由背景 thread 定期呼叫）。"""
+    now = time.monotonic()
+    with _CONNECTION_POOL_LOCK:
+        stale = []
+        for key, client in list(_CONNECTION_POOL.items()):
+            if now - client.last_used_at > CONNECTION_IDLE_TIMEOUT:
+                stale.append((key, client))
+                _CONNECTION_POOL.pop(key, None)
+    for key, client in stale:
+        try:
+            client.close()
+        except Exception:
+            pass
+    if stale:
+        _log.info("[pool] 回收 %d 條閒置連線", len(stale))
+
+
+def _start_pool_reaper() -> threading.Thread:
+    """啟動背景 thread，定期回收閒置連線。"""
+    def loop() -> None:
+        while True:
+            time.sleep(15)
+            try:
+                _close_stale_connections()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=loop, daemon=True, name="pool-reaper")
+    t.start()
+    return t
 
 
 def create_app(store: DeviceStore | None = None,
@@ -70,14 +200,6 @@ def create_app(store: DeviceStore | None = None,
     # 內部工具
     # --------------------------------------------------------------
 
-    def _client_for(device: dict) -> AtTcpClient:
-        """依設備記錄建立 AT 客戶端。"""
-        return AtTcpClient(
-            device.get("host", ""),
-            int(device.get("port", AT_PORT)),
-            timeout=5.0,
-        )
-
     def _push_state(device: dict, state: dict) -> None:
         """推播設備狀態變更。"""
         app.broadcaster.broadcast(build_status_event(device, state))
@@ -91,7 +213,7 @@ def create_app(store: DeviceStore | None = None,
         """健康檢查。"""
         return jsonify({
             "ok": True,
-            "version": "1.0.2",
+            "version": "1.0.3",
             "device_count": len(app.store),
             "ws_clients": app.broadcaster.client_count(),
             "at_port": AT_PORT,
@@ -194,13 +316,24 @@ def create_app(store: DeviceStore | None = None,
         if not device:
             return jsonify({"error": "找不到此設備"}), 404
 
-        client = _client_for(device)
         try:
+            client, reused = _get_pooled_client(device)
+            # ★ 先取得 client（記下 reused），再清計時，最後補回 reused
+            was_reused = reused
+            client.clear_timings()
+            if was_reused:
+                client.mark_reused()
+            if not reused and not client.connect():
+                return jsonify({"error": f"無法連線到 {device.get('host')}"
+                                           f":{device.get('port')}"}), 502
             state = client.poll_states()
+            timings = list(client.op_timings)
         except AtError as exc:
+            _release_pooled_client(client, device, keep=False)
             return jsonify({"error": str(exc)}), 502
         finally:
-            client.close()
+            # ★ P1-1：查詢路徑同樣放回池子，讓後續寫入能複用連線
+            _release_pooled_client(client, device, keep=True)
 
         # 快取狀態到清單中，供列表頁快速顯示
         app.store.update(device_id, state=state, connected=state["connected"])
@@ -209,6 +342,7 @@ def create_app(store: DeviceStore | None = None,
         return jsonify({
             "device": {**device, "state": state,
                        "connected": state["connected"]},
+            "timings": timings,
         })
 
     @app.route("/api/devices/<int:device_id>/do", methods=["POST"])
@@ -228,28 +362,71 @@ def create_app(store: DeviceStore | None = None,
             return jsonify({"error": "channel 必須是數字"}), 400
         on = bool(data.get("on", True))
 
-        client = _client_for(device)
+        # ★ P0-5：防止同一台設備被重複下指令（非阻塞）
+        io_lock = _io_lock_for(device_id)
+        if not io_lock.acquire(blocking=False):
+            return jsonify({
+                "error": "上一個指令還在執行中，請稍候再試",
+                "busy": True,
+            }), 409
         try:
-            if not client.connect():
+            client, reused = _get_pooled_client(device)
+            # ★ 必須在 _get_pooled_client() 之後清空計時，
+            #   否則 mark_reused() 記錄的「連線複用」會被清掉，
+            #   瀑布圖就看不出這次是複用還是新建連線。
+            #   → 改成：先記下 reused 狀態，清空後再補回。
+            was_reused = reused
+            client.clear_timings()
+            if was_reused:
+                client.mark_reused()
+            if not reused and not client.connect():
                 return jsonify({"error": f"無法連線到 {device.get('host')}"
                                            f":{device.get('port')}"}), 502
             res = client.set_do(channel, on)
             if not res.ok:
+                # 寫入失敗就不放回池子（連線狀態可能已不可靠）
+                _release_pooled_client(client, device, keep=False)
                 return jsonify({
                     "error": res.detail or "指令失敗",
                     "response": res.response,
+                    "timings": client.op_timings,
                 }), 502
-            # 回讀完整狀態一併回傳，讓前端可以立即更新
-            state = client.poll_states()
+            # ★ P0-1 + P1-2：寫入後只回讀 DO（最省的路徑）。
+            #   - quick=True：跳過 AT 握手與靜態資訊（名稱/型號/韌體/AI）
+            #   - include_di=False：連 DI 都不查
+            #     DI 是外部輸入狀態，切檔不會改變它；
+            #     而 AT+OCCH0 又要 ~440ms，是切檔路徑上最大的一段浪費。
+            #   舊流程在這裡多花 ~3.3 秒，是「按下去要等 5~10 秒」的主因。
+            state = client.poll_states(quick=True, include_di=False)
+            # ★ include_di=False 時 DI 會是空的，這裡把上一次快取的 DI
+            #   合併回來，避免前端顯示的 DI 狀態突然消失。
+            #   （DI 是外部輸入，切檔不會改變它，所以沿用舊值是正確的。）
+            #   ★ 要從 store 重新取：區域變數 device 是進來時的快照，
+            #     未必包含上一次查詢寫入的 state。
+            if not state.get("di"):
+                fresh = app.store.get(device_id) or {}
+                prev = fresh.get("state") or {}
+                prev_di = prev.get("di")
+                if prev_di:
+                    state["di"] = prev_di
+            timings = list(client.op_timings)
         except AtError as exc:
+            _release_pooled_client(client, device, keep=False)
             return jsonify({"error": str(exc)}), 502
         finally:
-            client.close()
+            # ★ P1-1：成功的連線放回池子，下次操作直接複用
+            _release_pooled_client(client, device, keep=True)
+            io_lock.release()
 
         app.store.update(device_id, state=state, connected=state["connected"])
         _push_state(device, state)
 
-        return jsonify({"ok": True, "detail": res.detail, "state": state})
+        return jsonify({
+            "ok": True,
+            "detail": res.detail,
+            "state": state,
+            "timings": timings,
+        })
 
     @app.route("/api/devices/<int:device_id>/all", methods=["POST"])
     def set_do_all(device_id: int):
@@ -264,23 +441,52 @@ def create_app(store: DeviceStore | None = None,
         data = request.get_json(silent=True) or {}
         on = bool(data.get("on", True))
 
-        client = _client_for(device)
+        # ★ P0-5：防止同一台設備被重複下指令（非阻塞）
+        io_lock = _io_lock_for(device_id)
+        if not io_lock.acquire(blocking=False):
+            return jsonify({
+                "error": "上一個指令還在執行中，請稍候再試",
+                "busy": True,
+            }), 409
         try:
-            if not client.connect():
+            client, reused = _get_pooled_client(device)
+            # ★ 先取得 client（會記下 reused），再清計時，最後補回 reused
+            was_reused = reused
+            client.clear_timings()
+            if was_reused:
+                client.mark_reused()
+            if not reused and not client.connect():
                 return jsonify({"error": f"無法連線到 {device.get('host')}"
                                            f":{device.get('port')}"}), 502
             res = client.set_do_all(on)
             if not res.ok:
+                _release_pooled_client(client, device, keep=False)
                 return jsonify({"error": res.detail or "指令失敗"}), 502
-            state = client.poll_states()
+            # ★ P0-1 + P1-2：同上，寫入後只回讀 DO
+            state = client.poll_states(quick=True, include_di=False)
+            # ★ 沿用先前的 DI 快取值（切檔不會改變 DI）
+            if not state.get("di"):
+                fresh = app.store.get(device_id) or {}
+                prev = fresh.get("state") or {}
+                prev_di = prev.get("di")
+                if prev_di:
+                    state["di"] = prev_di
+            timings = list(client.op_timings)
         except AtError as exc:
+            _release_pooled_client(client, device, keep=False)
             return jsonify({"error": str(exc)}), 502
         finally:
-            client.close()
+            _release_pooled_client(client, device, keep=True)
+            io_lock.release()
 
         app.store.update(device_id, state=state, connected=state["connected"])
         _push_state(device, state)
-        return jsonify({"ok": True, "detail": res.detail, "state": state})
+        return jsonify({
+            "ok": True,
+            "detail": res.detail,
+            "state": state,
+            "timings": timings,
+        })
 
     # --------------------------------------------------------------
     # 網段掃描
@@ -395,11 +601,14 @@ def create_app(store: DeviceStore | None = None,
             return jsonify({"error": "command 必填"}), 400
 
         device_id = data.get("id")
+        pooled = False
         if device_id is not None:
             device = app.store.get(int(device_id))
             if not device:
                 return jsonify({"error": "找不到此設備"}), 404
-            client = _client_for(device)
+            # ★ P1-1：AT 測試也走連線池，這樣除錯時看到的耗時
+            #   與實際操作一致（都是複用既有連線）。
+            client, pooled = _get_pooled_client(device)
         else:
             # 沒指定設備時，直接用 request 的 host/port
             host = str(data.get("host", "")).strip()
@@ -412,15 +621,34 @@ def create_app(store: DeviceStore | None = None,
             client = AtTcpClient(host, port, timeout=5.0)
 
         try:
-            if not client.connect():
+            # ★ 先取得 client（記下 reused），再清計時，最後補回 reused
+            was_pooled = pooled
+            client.clear_timings()
+            if was_pooled:
+                client.mark_reused()
+            if not pooled and not client.connect():
                 return jsonify({"error": "無法連線"}), 502
             response = client.send(command)
+            timings = list(client.op_timings)
         except AtError as exc:
+            if device_id is not None:
+                _release_pooled_client(client, device, keep=False)
+            else:
+                client.close()
             return jsonify({"error": str(exc)}), 502
         finally:
-            client.close()
+            if device_id is not None:
+                _release_pooled_client(client, device, keep=True)
+            else:
+                client.close()
 
-        return jsonify({"ok": True, "command": command, "response": response})
+        # ★ P2-4：AT 測試也回傳耗時，讓前端能顯示逐段時間
+        return jsonify({
+            "ok": True,
+            "command": command,
+            "response": response,
+            "timings": timings,
+        })
 
     return app
 
@@ -439,6 +667,8 @@ def main() -> None:
 
     app = create_app()
     port = int(os.environ.get("NRMC_HTTP_PORT", "8080"))
+    # ★ P1-1：啟動連線池回收 thread
+    _start_pool_reaper()
     app.logger.info("NR-MC 控制台後端啟動，監聽 0.0.0.0:%s", port)
     app.logger.info("AT port=%s 掃描網段=%s", AT_PORT, SCAN_SUBNET or "(自動)")
     app.run(host="0.0.0.0", port=port, threaded=True)

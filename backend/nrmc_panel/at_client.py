@@ -107,7 +107,7 @@ class AtTcpClient:
         host: str,
         port: int = 12345,
         timeout: float = 3.0,
-        quiet_ms: int = 200,
+        quiet_ms: int = 150,
     ):
         self.host = host
         self.port = port
@@ -116,6 +116,23 @@ class AtTcpClient:
         self._sock: socket.socket | None = None
         self._buf = bytearray()
         self._lock = threading.Lock()
+        # ★ P1-1：最後一次使用時間（連線池用來判斷閒置多久可回收）
+        self.last_used_at = time.monotonic()
+        # ★ 操作耗時記錄：每次 send / connect 會 append
+        #   {"cmd": ..., "ms": ...}，供 /do 回傳 timings 做瓶頸分析。
+        self.op_timings: list[dict] = []
+        # ★ P0-3：這個型號有沒有 AI 通道？
+        #   None = 還不知道（下次會試一次）；True/False = 已確認。
+        #   確認沒有之後就不再送 AT+AIVALUE0，省一趟指令。
+        self._ai_supported: bool | None = None
+        # ★ P1-2：最近一次 DO 回讀的結果。
+        #   set_do() 回讀完會把結果放這裡，poll_states() 直接複用，
+        #   避免同一次操作送兩次 AT+STACH0?（每次約 440ms）。
+        self.last_do_states: dict[int, bool] | None = None
+
+    def clear_timings(self) -> None:
+        """清空本輪操作的耗時記錄（每次 HTTP 請求開始時呼叫）。"""
+        self.op_timings = []
 
     # -- 連線 -------------------------------------------------------------
 
@@ -125,18 +142,31 @@ class AtTcpClient:
         Returns:
             True 表示連線成功，False 表示失敗（不拋例外，方便 UI 處理）。
         """
+        t0 = time.monotonic()
         self.close()
         try:
             s = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError:
             self._sock = None
+            self.op_timings.append({"cmd": "<connect>",
+                                     "ms": round((time.monotonic() - t0) * 1000, 1),
+                                     "reused": False, "ok": False})
             return False
         s.settimeout(self.timeout)
         # 關閉 Nagle 演算法，降低小封包的延遲（AT 指令都很短）
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = s
         self._buf.clear()
+        self.last_used_at = time.monotonic()
+        self.op_timings.append({"cmd": "<connect>",
+                                 "ms": round((time.monotonic() - t0) * 1000, 1),
+                                 "reused": False, "ok": True})
         return True
+
+    def mark_reused(self) -> None:
+        """連線池命中時記一筆 0ms 的 connect，方便瀑布圖看出省了多少。"""
+        self.op_timings.append({"cmd": "<connect>",
+                                 "ms": 0.0, "reused": True, "ok": True})
 
     def close(self) -> None:
         """關閉連線（可重複呼叫）。"""
@@ -163,11 +193,16 @@ class AtTcpClient:
     # -- 收發 -------------------------------------------------------------
 
     def _recv_until_quiet(self, quiet_ms: int | None = None,
-                          max_wait: float | None = None) -> str:
+                          max_wait: float | None = None,
+                          early_ok: bool = False) -> str:
         """讀取回覆，直到「閒置」一小段時間就返回。
 
         這是 AT over TCP 的核心策略。查詢指令沒有 OK 結尾，若等待 OK
         會永遠卡住，因此改用 idle timeout 判斷回覆結束。
+
+        Args:
+            early_ok: 寫入類指令（回覆只有單行 OK/ERROR）可提前返回，
+                不用等滿 quiet_ms。這是檔位切換最大的加速來源。
         """
         if self._sock is None:
             raise AtError("尚未連線")
@@ -199,13 +234,28 @@ class AtTcpClient:
             if not data:
                 break
             self._buf.extend(data)
+            # ★ 寫入類指令加速：回覆只有單行 OK / ERROR，
+            #   一收到就直接返回，不用等滿 quiet_ms。
+            #   實測這一段省下 ~150ms（一次 quiet 視窗）。
+            if early_ok:
+                text = bytes(self._buf).decode("utf-8",
+                                               errors="replace").strip().upper()
+                if text == "OK" or text.startswith("OK\r") \
+                        or text.startswith("OK\n") or text == "ERROR" \
+                        or text.startswith("ERROR\r") \
+                        or text.startswith("ERROR\n"):
+                    break
             idle_deadline = time.monotonic() + quiet
 
         return bytes(self._buf).decode("utf-8", errors="replace").strip()
 
     def send(self, command: str, quiet_ms: int | None = None,
-             max_wait: float | None = None) -> str:
+             max_wait: float | None = None, early_ok: bool = False) -> str:
         """送出一行 AT 指令，回傳回覆文字（可能多行）。
+
+        Args:
+            early_ok: 寫入類指令（回覆只有單行 OK/ERROR）收到後立刻返回，
+                不用等滿 quiet_ms。查詢類指令必須保持 False。
 
         Raises:
             AtError: 尚未連線或送出失敗。
@@ -214,6 +264,8 @@ class AtTcpClient:
             raise AtError("尚未連線")
         with self._lock:
             self._buf.clear()
+            self.last_used_at = time.monotonic()
+            t0 = time.monotonic()
             try:
                 self._sock.sendall(
                     (command + TERM).encode("utf-8", errors="replace")
@@ -221,7 +273,12 @@ class AtTcpClient:
             except OSError as exc:
                 self.close()
                 raise AtError(f"送出失敗：{exc}") from exc
-            return self._recv_until_quiet(quiet_ms, max_wait)
+            try:
+                return self._recv_until_quiet(quiet_ms, max_wait,
+                                              early_ok=early_ok)
+            finally:
+                ms = round((time.monotonic() - t0) * 1000, 1)
+                self.op_timings.append({"cmd": command, "ms": ms})
 
     # -- 基本指令 ---------------------------------------------------------
 
@@ -299,14 +356,14 @@ class AtTcpClient:
 
     # -- IO ---------------------------------------------------------------
 
-    def get_do_states(self) -> AtResult:
+    def get_do_states(self, quiet_ms: int | None = None) -> AtResult:
         """讀取所有 DO 通道狀態。
 
         實測回覆為多行：
             +STACH1:0,100000
             +STACH2:0,100000
         """
-        resp = self.send("AT+STACH0?")
+        resp = self.send("AT+STACH0?", quiet_ms=quiet_ms)
         states: dict[int, bool] = {}
         for m in re.finditer(r"\+STACH(\d+):(\d+)", resp):
             states[int(m.group(1))] = (m.group(2) == "1")
@@ -319,21 +376,33 @@ class AtTcpClient:
         res.parsed_do = states
         return res
 
-    def set_do(self, channel: int, on: bool) -> AtResult:
+    def set_do(self, channel: int, on: bool,
+             verify: bool = True, read_quiet_ms: int = 120) -> AtResult:
         """設定單一 DO 通道。
 
         Args:
             channel: 通道編號（1 起算）。0 表示全部通道。
             on: True 開啟、False 關閉。
+            verify: 是否回讀確認（檔位切換一定要開，確保互鎖結果正確）。
+            read_quiet_ms: 回讀查詢的 quiet 視窗。寫入本身用 early_ok
+                提前返回，回讀仍需等完整多行回覆。
 
         寫入後會回讀確認，確保實際狀態與指令一致。
+
+        ★ P1-2：回讀結果會存進 self.last_do_states，
+          讓呼叫端（poll_states）不必再送一次 AT+STACH0?。
+          舊流程在一次切檔中送兩次 AT+STACH0?（各約 440ms），
+          這是切檔路徑上最大的一段浪費。
         """
         cmd = f"AT+STACH{channel}={1 if on else 0}"
-        resp = self.send(cmd)
+        # ★ 寫入只回單行 OK，用 early_ok 不必等滿 quiet 視窗（省 ~150ms）
+        resp = self.send(cmd, early_ok=True)
         ok = resp.upper().startswith("OK")
         detail = ""
-        if ok:
-            back = self.get_do_states()
+        if ok and verify:
+            back = self.get_do_states(quiet_ms=read_quiet_ms)
+            # ★ 把回讀結果記下來，供 poll_states 複用
+            self.last_do_states = dict(back.parsed_do)
             if not back.ok:
                 detail = "寫入成功，但回讀失敗"
             elif channel == 0:
@@ -393,14 +462,26 @@ class AtTcpClient:
 
     # -- 綜合查詢 ---------------------------------------------------------
 
-    def poll_states(self) -> dict:
+    def poll_states(self, quick: bool = False,
+                    include_di: bool = True) -> dict:
         """一次取得所有可用的 IO 狀態。
 
         這是 UI 顯示「連線狀態 + DO/DI 狀態」的單一入口。
         任何子查詢失敗都不會中斷整體流程。
 
         ★ 本方法會自行建立連線（若尚未連線），因此呼叫端不需要
-          先呼叫 connect()，讓「取得狀態」成為一���自洽的操作。
+          先呼叫 connect()，讓「取得狀態」成為一個自洽的操作。
+
+        Args:
+            quick: True 只回讀 DO + DI（給寫入後的快速刷新用）。
+                跳過 AT 測試、名稱／型號／韌體、AI 查詢。
+                寫入路徑本來就已經連上且驗證過，不需要再花
+                5 條 AT 去問不會變的靜態資訊。
+            include_di: False 時連 DI 都不查（只回讀 DO）。
+                ★ 這是切檔最快的路徑：DO 回讀本來就要 ~440ms，
+                  再加一條 AT+OCCH0 又要 ~440ms，而 DI 狀態在
+                  切檔時根本不會變（DI 是外部輸入，不受 DO 影響）。
+                  實測這樣可以再省掉約 440ms。
 
         Returns:
             dict 含 connected / model / name / do / di / ai / error
@@ -426,6 +507,40 @@ class AtTcpClient:
                 result["error"] = f"無法連線到 {self.host}:{self.port}：{exc}"
                 return result
 
+        # ★ quick 模式（寫入後的刷新）：跳過 AT 握手與靜態資訊查詢，
+        #   只回讀 DO（+ DI，除非指定不查）。
+        #   名稱／型號／韌體在寫入前已經驗證過，不會在一次切檔中改變。
+        if quick:
+            result["connected"] = True
+            # ★ P1-2：set_do() 剛剛已經回讀過 DO 了，直接複用，
+            #   不要再送一次 AT+STACH0?（每次約 440ms）。
+            if self.last_do_states is not None:
+                result["do"] = {str(k): v
+                                for k, v in self.last_do_states.items()}
+            else:
+                try:
+                    res = self.get_do_states()
+                    result["do"] = {str(k): v for k, v in
+                                    res.parsed_do.items()}
+                except AtError:
+                    pass
+            if include_di:
+                try:
+                    res = self.get_di_states()
+                    result["di"] = {str(k): v for k, v in
+                                    res.parsed_di.items()}
+                except AtError:
+                    pass
+            # ★ P0-3：已確認沒有 AI 通道的型號，quick 模式直接跳過
+            if self._ai_supported:
+                try:
+                    res = self.get_ai_values()
+                    result["ai"] = {str(k): v for k, v in
+                                    res.parsed_ai.items()}
+                except AtError:
+                    pass
+            return result
+
         try:
             test = self.test_connection()
         except AtError as exc:
@@ -440,23 +555,46 @@ class AtTcpClient:
 
         for key, fn in (
             ("name", self.get_name),
-            ("model", self.get_model),
-            ("firmware", self.get_firmware),
         ):
             try:
                 result[key] = fn().detail
             except AtError:
                 pass
 
+        # ★ P0-2：model 與 firmware 都來自同一份 AT+DEVICEINFO=?
+        #   回覆。以前 get_model() 與 get_firmware() 各自送一次指令，
+        #   等於同一份資料送了兩趟（每次約 450ms）。這裡只送一次。
+        try:
+            info = self.get_device_info()
+            result["model"] = info.parsed.get("UT", "")
+            result["firmware"] = info.parsed.get("FV", "")
+        except AtError:
+            pass
+
         for key, fn in (("do", self.get_do_states),
-                        ("di", self.get_di_states),
-                        ("ai", self.get_ai_values)):
+                        ("di", self.get_di_states)):
             try:
                 res = fn()
-                result[key] = {str(k): v for k, v in res.parsed_do.items()} \
-                    if key == "do" else \
-                    ({str(k): v for k, v in res.parsed_di.items()} if key == "di"
-                     else {str(k): v for k, v in res.parsed_ai.items()})
+                result[key] = {str(k): v for k, v in
+                               (res.parsed_do if key == "do"
+                                else res.parsed_di).items()}
+            except AtError:
+                pass
+
+        # ★ P0-3：AI 通道只有部分型號有（NR-MC4401 有，NR-MC2201 沒有）。
+        #   對沒有 AI 的型號送 AT+AIVALUE0 會回 ERROR，純粹浪費一趟。
+        #   因此先看型號：型號已知不含 AI 時就不送；
+        #   型號未知（第一輪連線時）才試一次並記住結果。
+        if self._ai_supported is None or self._ai_supported:
+            try:
+                res = self.get_ai_values()
+                if res.ok:
+                    self._ai_supported = True
+                    result["ai"] = {str(k): v for k, v in
+                                    res.parsed_ai.items()}
+                elif self._ai_supported is None:
+                    # 首次確認這個型號沒有 AI，之後不再送
+                    self._ai_supported = False
             except AtError:
                 pass
 

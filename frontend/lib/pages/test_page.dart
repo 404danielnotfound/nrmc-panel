@@ -21,6 +21,7 @@ import 'package:provider/provider.dart';
 import '../api/api_client.dart';
 import '../state/app_state.dart';
 import '../widgets/common.dart';
+import '../widgets/timing_widgets.dart';
 
 class TestPage extends StatefulWidget {
   const TestPage({super.key});
@@ -34,6 +35,9 @@ class _TestPageState extends State<TestPage> {
   final TextEditingController _atCtrl = TextEditingController(text: 'AT');
   String? _atResponse;
   bool _atBusy = false;
+
+  /// ★ P2-4：AT 指令測試也要能看到逐段耗時。
+  List<OperationTiming> _atTimings = const [];
 
   @override
   void dispose() {
@@ -88,9 +92,12 @@ class _TestPageState extends State<TestPage> {
             controller: _atCtrl,
             busy: _atBusy,
             response: _atResponse,
+            timings: _atTimings,
             device: device,
             onSend: _sendAt,
           ),
+          const SizedBox(height: 16),
+          const OperationTimeline(),
         ],
       ),
     );
@@ -100,16 +107,18 @@ class _TestPageState extends State<TestPage> {
     setState(() {
       _atBusy = true;
       _atResponse = null;
+      _atTimings = const [];
     });
     final app = context.read<AppState>();
-    final res = await app.sendAt(
+    final (response, timings) = await app.sendAt(
       deviceId: device.id,
       command: command,
     );
     if (!mounted) return;
     setState(() {
       _atBusy = false;
-      _atResponse = res ?? '';
+      _atResponse = response;
+      _atTimings = timings;
     });
   }
 }
@@ -321,7 +330,10 @@ class _FanControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
-    final busy = app.busyDeviceId == device.id;
+    // ★ P1-4：用 opPhase 判斷忙碌狀態，比 busyDeviceId 更精準
+    //   （busyDeviceId 是全域的，切換設備時會互相干擾）。
+    final busy = app.isOpBusy(device.id);
+    final phase = app.opPhaseOf(device.id);
     final doStates = device.doStates;
     final do1 = doStates[1] ?? false;
     final do2 = doStates[2] ?? false;
@@ -345,6 +357,17 @@ class _FanControl extends StatelessWidget {
           SectionHeader(
             title: '風機檔位',
             subtitle: '目前：$current',
+            trailing: busy
+                ? Chip(
+                    label: Text(opPhaseLabel(phase)),
+                    avatar: const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    visualDensity: VisualDensity.compact,
+                  )
+                : null,
           ),
           const SizedBox(height: 6),
           Text(
@@ -354,7 +377,9 @@ class _FanControl extends StatelessWidget {
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
+          // ★ P2-1：操作狀態卡 —— 讓使用者知道指令已經送出去了
+          OperationStatusCard(deviceId: device.id, label: '風機控制'),
           Row(
             children: [
               Expanded(
@@ -419,6 +444,17 @@ class _FanControl extends StatelessWidget {
   Future<void> _set(BuildContext context, int channel, bool on) async {
     final app = context.read<AppState>();
     final messenger = ScaffoldMessenger.of(context);
+    // ★ P1-4：進行中直接忽略重複點擊，不再送出第二個請求。
+    //   使用者看到慢會再按一次，這裡擋掉並提示。
+    if (app.isOpBusy(device.id)) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('指令執行中，請勿重複點擊'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+      return;
+    }
     final err = await app.setDo(device.id, channel: channel, on: on);
     if (err != null) {
       messenger.showSnackBar(SnackBar(content: Text('操作失敗：$err')));
@@ -428,6 +464,15 @@ class _FanControl extends StatelessWidget {
   Future<void> _setAll(BuildContext context, bool on) async {
     final app = context.read<AppState>();
     final messenger = ScaffoldMessenger.of(context);
+    if (app.isOpBusy(device.id)) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('指令執行中，請勿重複點擊'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+      return;
+    }
     final err = await app.setAllDo(device.id, on: on);
     if (err != null) {
       messenger.showSnackBar(SnackBar(content: Text('操作失敗：$err')));
@@ -519,6 +564,7 @@ class _AtCommandPanel extends StatelessWidget {
     required this.controller,
     required this.busy,
     required this.response,
+    required this.timings,
     required this.device,
     required this.onSend,
   });
@@ -526,6 +572,7 @@ class _AtCommandPanel extends StatelessWidget {
   final TextEditingController controller;
   final bool busy;
   final String? response;
+  final List<OperationTiming> timings;
   final Device device;
   final Future<void> Function(Device, String) onSend;
 
@@ -604,6 +651,17 @@ class _AtCommandPanel extends StatelessWidget {
                 style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
               ),
             ),
+          ],
+          // ★ P2-4：AT 指令測試也顯示逐段耗時，
+          //   這樣可以實測各條指令的單獨耗時，定位瓶頸。
+          if (timings.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            const SectionHeader(
+              title: '本次耗時',
+              subtitle: '每一步花了多久',
+            ),
+            const SizedBox(height: 10),
+            TimingWaterfall(timings: timings),
           ],
         ],
       ),
