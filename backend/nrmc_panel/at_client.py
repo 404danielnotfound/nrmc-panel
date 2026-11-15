@@ -377,7 +377,8 @@ class AtTcpClient:
         return res
 
     def set_do(self, channel: int, on: bool,
-             verify: bool = True, read_quiet_ms: int = 120) -> AtResult:
+             verify: bool = True, read_quiet_ms: int = 120,
+             interlock_channels: tuple[int, ...] = ()) -> AtResult:
         """設定單一 DO 通道。
 
         Args:
@@ -386,6 +387,17 @@ class AtTcpClient:
             verify: 是否回讀確認（檔位切換一定要開，確保互鎖結果正確）。
             read_quiet_ms: 回讀查詢的 quiet 視窗。寫入本身用 early_ok
                 提前返回，回讀仍需等完整多行回覆。
+            interlock_channels: ★ 需要互鎖的通道群組（例如 (1, 2)）。
+                當 channel 在此群組內且 on=True 時，
+                會先將群組內其他通道設為 0，再設定目標通道。
+
+                ★ 為什麼需要這個？
+                  NR-MC2201-WIFI 的 DO1/DO2 理論上有硬體互鎖，
+                  但實測發現部分韌體版本並不會自動關閉另一路，
+                  結果是回讀到兩個 DO 同時開啟，
+                  前端判斷為「異常」，三個檔位按鈕都不會高亮。
+                  與其依賴韌體行為，不如由上位機明確送出互鎖指令，
+                  確保「開二檔」一定會把「一檔」關掉。
 
         寫入後會回讀確認，確保實際狀態與指令一致。
 
@@ -394,6 +406,22 @@ class AtTcpClient:
           舊流程在一次切檔中送兩次 AT+STACH0?（各約 440ms），
           這是切檔路徑上最大的一段浪費。
         """
+        # ★ 互鎖：先關掉同群組的其他通道
+        if on and channel != 0 and channel in interlock_channels:
+            for other in interlock_channels:
+                if other == channel:
+                    continue
+                # 先關閉；即使失敗也繼續（後續回讀會驗證結果）
+                resp_off = self.send(f"AT+STACH{other}=0", early_ok=True)
+                if not resp_off.upper().startswith("OK"):
+                    # 關不掉就先中止，不要留下兩路都開的危險狀態
+                    return AtResult(
+                        False,
+                        f"AT+STACH{other}=0",
+                        resp_off,
+                        f"互鎖失敗：無法關閉 DO{other}，已中止切換以避免兩路同時導通",
+                    )
+
         cmd = f"AT+STACH{channel}={1 if on else 0}"
         # ★ 寫入只回單行 OK，用 early_ok 不必等滿 quiet 視窗（省 ~150ms）
         resp = self.send(cmd, early_ok=True)
@@ -416,11 +444,93 @@ class AtTcpClient:
                     detail = f"回讀 DO{channel} = {got}，與設定值不符"
                 else:
                     detail = "回讀確認一致"
+                    # ★ 驗證互鎖結果：同群組的其他通道必須是關的。
+                    #   若韌體沒有硬體互鎖，這裡會抓到「兩路同時開」。
+                    for other in interlock_channels:
+                        if other == channel:
+                            continue
+                        other_state = back.parsed_do.get(other)
+                        if other_state is True:
+                            ok = False
+                            detail = (f"互鎖異常：DO{channel} 已開啟但 DO{other} "
+                                      f"仍為開啟（韌體可能不支援硬體互鎖）")
+                            break
         return AtResult(ok, cmd, resp, detail)
 
-    def set_do_all(self, on: bool) -> AtResult:
-        """設定所有 DO 通道（channel=0）。"""
-        return self.set_do(0, on)
+    def set_do_all(self, on: bool,
+                   interlock_channels: tuple[int, ...] = ()) -> AtResult:
+        """設定所有 DO 通道（channel=0）。
+
+        ★ 互鎖處理：
+          群組內的通道互斥，無法同時開啟。
+          「全部開啟」若直接送 AT+STACH0=1，會讓互鎖群組內的通道
+          互相覆蓋（最後寫入的那個贏），導致使用者預期與實際不符。
+          因此改成逐通道設定：群組內只開第一個通道，
+          其餘群組外的通道才真正全部開啟。
+        """
+        # ★ 關閉全部：直接送 AT+STACH0=0。
+        #   一次寫入即可關閉所有通道，最快也最可靠，
+        #   而且不受互鎖群組影響。
+        if not on:
+            return self.set_do(0, False)
+
+        if not interlock_channels:
+            return self.set_do(0, on)
+
+        # 取得所有通道（用於知道有哪些通道要設定）
+        back = self.get_do_states(quiet_ms=120)
+        channels = sorted(back.parsed_do.keys()) if back.parsed_do else [1, 2]
+        if not channels:
+            return self.set_do(0, on)
+
+        # ★ 順序很重要：先關閉群組內的其他通道，再開啟目標通道。
+        #   原因：硬體互鎖的觸發條件是「寫入某通道」，
+        #   有些韌體連寫入 0（關閉）也會把同組其他通道一起關掉。
+        #   若順序反了（先開 DO1，再關 DO2），
+        #   最後一次寫入會讓 DO1 被意外關掉 → 回讀變成全部關閉。
+        group = tuple(interlock_channels)
+        target_on = [c for c in channels if c not in group]
+        if on and group:
+            target_on.append(group[0])
+        if not target_on:
+            # 沒有任何通道可開（例如所有通道都在同一個互鎖群組）
+            return self.set_do(0, on)
+
+        last = None
+        # 1) 先關閉群組內不需要開啟的通道
+        for ch in group:
+            if ch in target_on:
+                continue
+            last = self.set_do(ch, False, verify=False)
+            if not last.ok:
+                return last
+        # 2) 再開啟目標通道（最後寫入，確保硬體互鎖結果正確）
+        for ch in target_on:
+            last = self.set_do(ch, True, verify=False)
+            if not last.ok:
+                return last
+        # 最終回讀驗證
+        final = self.get_do_states(quiet_ms=120)
+        self.last_do_states = dict(final.parsed_do)
+        if not final.ok:
+            return AtResult(False, "AT+STACH0?", final.response,
+                            "寫入成功，但回讀失敗")
+        if on:
+            # ★ 互鎖群組內最多只能有一個開啟。
+            #   注意：這裡只檢查「群組內最多一個開啟」，
+            #   不要求每個通道都精確等於預期值 —
+            #   因為硬體互鎖可能讓最後寫入的通道覆蓋其他通道，
+            #   而群組外的通道數量也無法事先確定。
+            group_states = [final.parsed_do.get(c) for c in group]
+            opened_in_group = sum(1 for s in group_states if s)
+            if opened_in_group > 1:
+                return AtResult(False, "AT+STACH0?", final.response,
+                                "互鎖異常：互鎖群組內有多個通道同時開啟")
+            if opened_in_group == 0:
+                return AtResult(False, "AT+STACH0?", final.response,
+                                "回讀結果與預期不符：沒有任何通道開啟")
+        return AtResult(True, "AT+STACH0=1", final.response,
+                        f"已開啟通道 {target_on}")
 
     def get_di_states(self) -> AtResult:
         """讀取所有 DI 通道狀態（多行）。

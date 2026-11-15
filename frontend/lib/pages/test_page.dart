@@ -338,17 +338,31 @@ class _FanControl extends StatelessWidget {
     final do1 = doStates[1] ?? false;
     final do2 = doStates[2] ?? false;
 
-    // 目前檔位
+    // ★ 目前檔位
+    //   正常情況：DO1/DO2 互斥，只會有一個開啟。
+    //   異常情況：兩個都開啟（韌體無互鎖或外部控制造成），
+    //     這時不能讓三個按鈕都不高亮，否則使用者完全無法判斷狀態。
+    //     改為優先顯示「二檔」（最後一次寫入的檔位通常代表使用者意圖），
+    //     並額外標示異常，讓使用者知道需要處理。
+    final bool bothOn = do1 && do2;
     final String current;
-    if (do1 && !do2) {
-      current = '一檔';
-    } else if (do2 && !do1) {
-      current = '二檔';
-    } else if (do1 && do2) {
+    if (bothOn) {
       current = '異常（兩檔同時開啟）';
+    } else if (do2) {
+      current = '二檔';
+    } else if (do1) {
+      current = '一檔';
     } else {
       current = '關閉';
     }
+
+    // ★ 按鈕的高亮判斷：
+    //   正常 → 依實際 DO 狀態高亮對應檔位。
+    //   異常 → 高亮「二檔」（使用者的最後意圖），並用警示色標示。
+    //   絕不允許三個按鈕同時都沒有 active，否則狀態會變得不明。
+    final bool speed1Active = bothOn ? false : do1;
+    final bool speed2Active = bothOn ? true : do2;
+    final bool offActive = !do1 && !do2;
 
     return InfoCard(
       child: Column(
@@ -371,12 +385,49 @@ class _FanControl extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'DO1 與 DO2 為硬體互鎖，同時只能開啟其中一檔。'
-            '切換檔位時裝置會自動關閉另一檔。',
+            'DO1 與 DO2 為互鎖關係，同時只能開啟其中一檔。'
+            '切換檔位時系統會自動先關閉另一檔，確保不會兩檔同時導通。',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
           ),
+          // ★ 異常狀態提示：兩檔同時開啟時明確告知使用者
+          if (bothOn)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.error,
+                    width: 1.5,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded,
+                        size: 18,
+                        color: Theme.of(context).colorScheme.onErrorContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'DO1 與 DO2 同時開啟，違反互鎖規則。'
+                        '請點選目標檔位以修正，或使用「關閉」。',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color:
+                              Theme.of(context).colorScheme.onErrorContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           const SizedBox(height: 14),
           // ★ P2-1：操作狀態卡 —— 讓使用者知道指令已經送出去了
           OperationStatusCard(deviceId: device.id, label: '風機控制'),
@@ -387,9 +438,12 @@ class _FanControl extends StatelessWidget {
                   label: '一檔',
                   sublabel: 'DO1',
                   icon: Icons.air,
-                  active: do1 && !do2,
+                  active: speed1Active,
                   busy: busy,
-                  onPressed: () => _set(context, 1, !do1),
+                  // ★ 明確設定檔位，不是 toggle：
+                  //   點「一檔」→ 一定是 DO1=ON（後端會先關 DO2）。
+                  //   舊的 toggle 寫法（!do1）會在狀態不同步時送出相反指令。
+                  onPressed: () => _set(context, 1, true),
                 ),
               ),
               const SizedBox(width: 12),
@@ -398,9 +452,10 @@ class _FanControl extends StatelessWidget {
                   label: '二檔',
                   sublabel: 'DO2',
                   icon: Icons.air,
-                  active: do2 && !do1,
+                  active: speed2Active,
                   busy: busy,
-                  onPressed: () => _set(context, 2, !do2),
+                  // ★ 點「二檔」→ 一定是 DO2=ON，DO1 由後端互鎖關閉。
+                  onPressed: () => _set(context, 2, true),
                 ),
               ),
               const SizedBox(width: 12),
@@ -409,7 +464,7 @@ class _FanControl extends StatelessWidget {
                   label: '關閉',
                   sublabel: '全部',
                   icon: Icons.power_settings_new,
-                  active: !do1 && !do2,
+                  active: offActive,
                   busy: busy,
                   onPressed: () => _setAll(context, false),
                 ),

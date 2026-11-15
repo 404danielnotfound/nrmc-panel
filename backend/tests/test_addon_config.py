@@ -119,6 +119,17 @@ def test_config_log_level_in_schema_choices(config):
     assert "debug" in choices
 
 
+def test_config_do_interlock_default(config):
+    """★ DO 互鎖預設必須是 "1,2"（風機一檔／二檔互斥）。
+
+    這是 1.0.4 的關鍵修正：若韌體沒有硬體互鎖，
+    上位機需要靠這個設定主動送出互鎖指令，
+    否則切檔後會出現「兩檔同時開啟」導致按鈕全部失去高亮。
+    """
+    assert config["options"]["do_interlock"] == "1,2"
+    assert "do_interlock" in config["schema"]
+
+
 # ----------------------------------------------------------------------
 # build.yaml
 # ----------------------------------------------------------------------

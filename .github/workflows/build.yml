@@ -87,7 +87,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}
           tags: |
-            type=raw,value=1.0.3
+            type=raw,value=1.0.4
             type=raw,value=latest,enable={{is_default_branch}}
 
       # --- 5. 建置並推送 ---

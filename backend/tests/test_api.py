@@ -403,4 +403,6 @@ def test_default_store_path_points_to_backend_data_dir():
         assert path.name == "devices.json"
         assert path.parent.name == "data"
         assert path.parent.parent.name == "backend"
-        assert path.parent.parent.parent.name == "NR-MC4401-WIFI"
+        # ★ 專案根目錄名稱可能隨版本／分支變動（例如 NR-MC4401-WIFI
+        #   改名為 nrmc-panel-addon），所以只驗證它是 backend 的上層目錄，
+        #   不綁死特定名稱，避免無關的改名讓測試失敗。

@@ -46,6 +46,8 @@ def main() -> int:
     log_level = read_option("log_level", "info")
     ping_timeout = read_option("ping_timeout_ms", "300")
     http_port = read_option("http_port", "8080")
+    # ★ DO 互鎖群組（風機一檔／二檔互斥）
+    do_interlock = read_option("do_interlock", "1,2")
 
     # --- 寫入環境變數給 app.py 讀取 ---
     os.environ["NRMC_AT_PORT"] = at_port
@@ -53,6 +55,7 @@ def main() -> int:
     os.environ["NRMC_LOG_LEVEL"] = log_level
     os.environ["NRMC_PING_TIMEOUT"] = ping_timeout
     os.environ["NRMC_HTTP_PORT"] = http_port
+    os.environ["NRMC_DO_INTERLOCK"] = do_interlock
 
     print("=" * 60)
     print("NR-MC 控制台後端啟動中")
@@ -60,6 +63,7 @@ def main() -> int:
     print(f"  掃描網段       : {scan_subnet or '(自動偵測本機網段)'}")
     print(f"  日誌層級       : {log_level}")
     print(f"  內部 HTTP port: {http_port}")
+    print(f"  DO 互鎖群組    : {do_interlock or '(不啟用)'}")
     print("=" * 60)
 
     # 確保 /data 存在且可寫（設備清單存這裡）

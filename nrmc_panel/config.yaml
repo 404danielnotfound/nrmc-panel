@@ -1,5 +1,5 @@
 name: NR-MC 控制台
-version: "1.0.3"
+version: "1.0.4"
 slug: nrmc_panel
 description: >-
   NR-MC 系列 WiFi 新風控制器管理面板。可搜尋區網內的設備、
@@ -36,9 +36,16 @@ options:
   log_level: info
   ping_timeout_ms: "300"
   http_port: "8080"
+  # DO 互鎖群組：同一群組內的通道互斥，同時只能開啟一個。
+  # 群組之間用「;」分隔，群組內的通道用「,」分隔。
+  #   "1,2"       → DO1 與 DO2 互鎖（風機一檔／二檔，推薦值）
+  #   "1,2;3,4"   → 兩組互鎖
+  #   ""          → 不做互鎖（不建議）
+  do_interlock: "1,2"
 schema:
   at_port: str
   scan_subnet: str?
   log_level: list(trace|debug|info|notice|warning|error|fatal)
   ping_timeout_ms: str
   http_port: str
+  do_interlock: str?

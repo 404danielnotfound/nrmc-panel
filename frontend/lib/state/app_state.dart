@@ -282,6 +282,10 @@ class AppState extends ChangeNotifier {
       connected: old.connected,
       state: Map<String, dynamic>.from(state),
     );
+    // ★ 推播後必須通知，否則 UI 不會重繪。
+    //   （沒有這行的話，WebSocket 推來的狀態不會即時反映在畫面上，
+    //     使用者會看到按鈕高亮停留在舊狀態。）
+    _safeNotify();
   }
 
   @override
@@ -387,11 +391,18 @@ class AppState extends ChangeNotifier {
   /// ★ P1-4：進行中的重複點擊直接忽略。
   ///   使用者看到風機慢會再按一次，後端也會回 409，
   ///   這裡在發出前就先擋掉，避免送出無意義的請求。
+  ///
+  /// ★ 樂觀更新：送出前先把預期狀態寫進本地 state，
+  ///   讓按鈕立刻高亮（不用等 ~600ms 的回應往返）。
+  ///   若後端回報失敗，_mergeState 會用真實狀態覆蓋樂觀值。
   Future<String?> setDo(int id, {required int channel, required bool on}) async {
     if (isOpBusy(id)) {
       return '上一個指令還在執行中，請稍候';
     }
     _beginOp(id, channel == 0 ? '全部通道' : 'DO$channel');
+    if (channel > 0) {
+      _optimisticDo(id, channel, on);
+    }
     try {
       final result = await api.setDo(id, channel: channel, on: on);
       _mergeState(id, result.state);
@@ -404,11 +415,88 @@ class AppState extends ChangeNotifier {
       return null;
     } on ApiException catch (e) {
       _endOp(id, OpPhase.failed, error: e.message);
+      _rollbackDo(id);
       return e.message;
     } catch (e) {
       _endOp(id, OpPhase.failed, error: e.toString());
+      _rollbackDo(id);
       return e.toString();
     }
+  }
+
+  /// 樂觀更新失敗時的回滾：重新讀取真實狀態。
+  ///
+  /// 若重新讀取也失敗（設備離線），就清除樂觀值，
+  /// 讓畫面回到「未知」而不是顯示錯誤的高亮狀態。
+  Future<void> _rollbackDo(int id) async {
+    try {
+      final state = await api.getState(id);
+      _mergeState(id, state);
+    } catch (_) {
+      // 讀不到就退回「未知」：清掉 do 狀態避免顯示錯誤高亮
+      final index = devices.indexWhere((Device d) => d.id == id);
+      if (index < 0) return;
+      final old = devices[index];
+      final newState = Map<String, dynamic>.from(old.state);
+      newState.remove('do');
+      devices[index] = Device(
+        id: old.id,
+        host: old.host,
+        port: old.port,
+        name: old.name,
+        model: old.model,
+        mac: old.mac,
+        connected: old.connected,
+        state: newState,
+      );
+      _safeNotify();
+    }
+  }
+
+  /// 樂觀更新本地 DO 狀態（送出指令前呼叫）。
+  ///
+  /// 只改變受影響的通道，並套用互鎖規則：
+  /// 開啟某通道時，會把同群組的其他通道預設為關閉。
+  /// 這樣按下「二檔」時畫面會立刻顯示「DO1 關、DO2 開」。
+  void _optimisticDo(int id, int channel, bool on) {
+    final index = devices.indexWhere((Device d) => d.id == id);
+    if (index < 0) return;
+    final old = devices[index];
+
+    // 複製現有 state（淺層複製後更新 do 子樹即可）
+    final newState = Map<String, dynamic>.from(old.state);
+    final rawDo = old.state['do'];
+    final doMap = <String, dynamic>{};
+    if (rawDo is Map) {
+      rawDo.forEach((k, v) => doMap['$k'] = v);
+    }
+
+    if (on) {
+      // ★ 互鎖：開啟 channel 時，其他通道先視為關閉
+      //   （與後端 DO_INTERLOCK_GROUPS 的預設一致：DO1/DO2 互斥）
+      for (final other in const [1, 2]) {
+        if (other == channel) continue;
+        if (doMap.containsKey('$other')) {
+          doMap['$other'] = false;
+        }
+      }
+      doMap['$channel'] = true;
+    } else {
+      doMap['$channel'] = false;
+    }
+    newState['do'] = doMap;
+
+    devices[index] = Device(
+      id: old.id,
+      host: old.host,
+      port: old.port,
+      name: old.name,
+      model: old.model,
+      mac: old.mac,
+      connected: old.connected,
+      state: newState,
+    );
+    _safeNotify();
   }
 
   /// 全部通道開／關。

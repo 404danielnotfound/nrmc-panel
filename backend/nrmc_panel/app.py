@@ -40,6 +40,56 @@ SCAN_SUBNET = os.environ.get("NRMC_SCAN_SUBNET", "")
 PING_TIMEOUT = int(os.environ.get("NRMC_PING_TIMEOUT", "300"))
 LOG_LEVEL = os.environ.get("NRMC_LOG_LEVEL", "info")
 
+# ★ DO 互鎖群組：同一群組內的通道互斥，同時只能開啟一個。
+#   NR-MC2201-WIFI / NR-MC4401 的 DO1、DO2 對應風機一檔／二檔，
+#   必須互斥（否則兩檔同時導通，前端也無法判斷目前檔位）。
+#   ★ 設定格式（環境變數 NRMC_DO_INTERLOCK）：
+#       群組之間用分號「;」分隔，群組內的通道用逗號「,」分隔。
+#       範例：「1,2」        → DO1 與 DO2 互鎖（單一群組，預設值）
+#             「1,2;3,4」    → 兩個群組，DO1/DO2 互斥、DO3/DO4 互斥
+#             「1,2;3,4;5,6」→ 三個群組
+#   留空則不做任何互鎖。
+#   ★ 為什麼上位機要主動送互鎖？
+#     韌體理論上有硬體互鎖，但實測部分版本不會自動關閉另一路，
+#     導致回讀到兩路同時開啟（「異常」狀態，三個按鈕都不高亮）。
+#     由上位機明確送出關閉指令，才能保證狀態一致。
+DO_INTERLOCK_GROUPS: list[tuple[int, ...]] = []
+_raw_interlock = os.environ.get("NRMC_DO_INTERLOCK", "1,2").strip()
+if _raw_interlock:
+    for _grp in _raw_interlock.split(";"):
+        _nums = tuple(
+            int(x) for x in _grp.strip().split(",")
+            if x.strip().isdigit()
+        )
+        if len(_nums) > 1:
+            DO_INTERLOCK_GROUPS.append(_nums)
+        elif _nums:
+            _log.warning(
+                "NRMC_DO_INTERLOCK 中的 %r 只有單一通道，已忽略（無法互鎖）",
+                _grp)
+if not DO_INTERLOCK_GROUPS:
+    # 設定無效或未設定 → 退回預設：DO1/DO2 互鎖（風機一檔／二檔）
+    DO_INTERLOCK_GROUPS = [(1, 2)]
+    _log.warning("NRMC_DO_INTERLOCK 未設定或無效，預設啟用 DO1/DO2 互鎖")
+
+
+def _interlock_for(channel: int) -> tuple[int, ...]:
+    """取得該通道所屬的互鎖群組（沒有則回傳空 tuple）。"""
+    for group in DO_INTERLOCK_GROUPS:
+        if channel in group:
+            return group
+    return ()
+
+
+def _all_interlock() -> tuple[int, ...]:
+    """取得所有互鎖群組涉及的通道（給「全部開啟／關閉」用）。"""
+    result: list[int] = []
+    for group in DO_INTERLOCK_GROUPS:
+        for ch in group:
+            if ch not in result:
+                result.append(ch)
+    return tuple(result)
+
 # 掃描狀態（記憶體內，供輪詢查詢）
 _scan_state: dict = {
     "running": False,
@@ -213,7 +263,7 @@ def create_app(store: DeviceStore | None = None,
         """健康檢查。"""
         return jsonify({
             "ok": True,
-            "version": "1.0.3",
+            "version": "1.0.4",
             "device_count": len(app.store),
             "ws_clients": app.broadcaster.client_count(),
             "at_port": AT_PORT,
@@ -382,7 +432,8 @@ def create_app(store: DeviceStore | None = None,
             if not reused and not client.connect():
                 return jsonify({"error": f"無法連線到 {device.get('host')}"
                                            f":{device.get('port')}"}), 502
-            res = client.set_do(channel, on)
+            res = client.set_do(channel, on,
+                                interlock_channels=_interlock_for(channel))
             if not res.ok:
                 # 寫入失敗就不放回池子（連線狀態可能已不可靠）
                 _release_pooled_client(client, device, keep=False)
@@ -458,7 +509,7 @@ def create_app(store: DeviceStore | None = None,
             if not reused and not client.connect():
                 return jsonify({"error": f"無法連線到 {device.get('host')}"
                                            f":{device.get('port')}"}), 502
-            res = client.set_do_all(on)
+            res = client.set_do_all(on, interlock_channels=_all_interlock())
             if not res.ok:
                 _release_pooled_client(client, device, keep=False)
                 return jsonify({"error": res.detail or "指令失敗"}), 502
